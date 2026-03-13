@@ -1,0 +1,122 @@
+name: TaskFlow CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Job 1: Lint
+  # ─────────────────────────────────────────────
+  lint:
+    name: Lint (flake8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Run flake8
+        run: |
+          flake8 src/ tests/ \
+            --max-line-length=100 \
+            --ignore=E501,W503 \
+            --statistics
+
+  # ─────────────────────────────────────────────
+  # Job 2: Test
+  # ─────────────────────────────────────────────
+  test:
+    name: Test (pytest + coverage)
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: pytest --cov=src --cov-report=xml --cov-report=term-missing -v
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+      - name: Enforce 80% coverage threshold
+        run: |
+          python -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('coverage.xml')
+          root = tree.getroot()
+          rate = float(root.attrib.get('line-rate', 0)) * 100
+          print(f'Coverage: {rate:.1f}%')
+          if rate < 80:
+              raise SystemExit(f'FAIL: Coverage {rate:.1f}% is below 80%')
+          print('PASS: Coverage threshold met.')
+          "
+
+  # ─────────────────────────────────────────────
+  # Job 3: Docker Build + Smoke Test
+  # ─────────────────────────────────────────────
+  build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t taskflow-api:${{ github.sha }} .
+
+      - name: Smoke test health endpoint
+        run: |
+          docker run -d -p 5000:5000 --name taskflow-test \
+            taskflow-api:${{ github.sha }}
+          sleep 3
+          curl -sf http://localhost:5000/health | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          assert d['status'] == 'healthy', f'Bad status: {d}'
+          print('Health check passed:', d)
+          "
+          docker stop taskflow-test
+
+  # ─────────────────────────────────────────────
+  # Job 4: Deploy (main branch only)
+  # ─────────────────────────────────────────────
+  deploy:
+    name: Deploy (main only)
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Simulate deploy to staging
+        run: |
+          echo "========================================"
+          echo " Deploying TaskFlow API to staging"
+          echo " Commit : ${{ github.sha }}"
+          echo " Branch : ${{ github.ref_name }}"
+          echo "========================================"
+          echo "Deploy simulation complete."
